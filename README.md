@@ -37,7 +37,7 @@ streamlit run app.py
 - `menu` (опционально): `menu_item`
 - `menu_map` (для сценариев с меню): `menu_item`, `sku`
 - `sales_history` (опционально): `sku`, `qty`
-- Фиксированные файлы категорий: `data/category_assortment/*.csv` (колонка `sku`)
+- Фиксированные файлы категорий: `data/category_assortment/*.csv` (колонка `name`)
 
 Готовые шаблоны лежат в папке `templates/`.
 Категории уже закреплены в папке `data/category_assortment/`:
@@ -59,4 +59,4 @@ streamlit run app.py
 
 - Разбор меню из PDF/JPEG пока не реализован (для MVP используется `menu.xlsx/csv`).
 - Интеграция с `avistrade.by` пока через файл `sku_links`.
-- Для лучшей точности нужен единый внутренний справочник SKU.
+- Для лучшей точности названия в категориях должны совпадать с колонкой `name` в прайсе.
