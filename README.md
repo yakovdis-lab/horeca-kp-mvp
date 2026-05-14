@@ -31,15 +31,17 @@ streamlit run app.py
 
 Приложение принимает `xlsx/xls/csv`.
 
-- `categories`: `category`, `sku`
 - `stock`: `sku`, `stock_qty`
 - `price`: `sku`, `name`, `price`
 - `sku_links`: `sku`, `url`
 - `menu` (опционально): `menu_item`
 - `menu_map` (для сценариев с меню): `menu_item`, `sku`
 - `sales_history` (опционально): `sku`, `qty`
+- Фиксированные файлы категорий: `data/category_assortment/*.csv` (колонка `sku`)
 
 Готовые шаблоны лежат в папке `templates/`.
+Категории уже закреплены в папке `data/category_assortment/`:
+`fastfood.csv`, `cafe.csv`, `bar.csv`, `restaurant.csv`, `coffeehouse.csv`, `retail.csv`, `tourism.csv`.
 
 ## Как разместить онлайн (прототип)
 
