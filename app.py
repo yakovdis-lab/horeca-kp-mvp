@@ -57,17 +57,16 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def normalize_text(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
+
+
 def ensure_columns(df: pd.DataFrame, required: list[str], name: str) -> bool:
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"В файле {name} не хватает колонок: {', '.join(missing)}")
         return False
     return True
-
-
-def prepare_sku_set_from_categories(categories_df: pd.DataFrame, selected_categories: list[str]) -> set[str]:
-    filtered = categories_df[categories_df["category"].isin(selected_categories)]
-    return set(filtered["sku"].astype(str).str.strip())
 
 
 def load_category_catalog(selected_categories: list[str]) -> pd.DataFrame:
@@ -84,17 +83,32 @@ def load_category_catalog(selected_categories: list[str]) -> pd.DataFrame:
             st.stop()
 
         part = normalize_cols(read_local_table(path, str(path)))
-        if not ensure_columns(part, ["sku"], str(path)):
+        if not ensure_columns(part, ["name"], str(path)):
             st.stop()
 
-        part["sku"] = part["sku"].astype(str).str.strip()
+        part["name"] = part["name"].astype(str).str.strip()
         part["category"] = category
-        chunks.append(part[["category", "sku"]])
+        chunks.append(part[["category", "name"]])
 
     if not chunks:
-        return pd.DataFrame(columns=["category", "sku"])
+        return pd.DataFrame(columns=["category", "name"])
 
     return pd.concat(chunks, ignore_index=True)
+
+
+def prepare_sku_set_from_categories(categories_df: pd.DataFrame, selected_categories: list[str], price_df: pd.DataFrame) -> set[str]:
+    filtered = categories_df[categories_df["category"].isin(selected_categories)].copy()
+    filtered["name_norm"] = filtered["name"].map(normalize_text)
+
+    price_lookup = price_df[["sku", "name"]].copy()
+    price_lookup["name_norm"] = price_lookup["name"].map(normalize_text)
+
+    merged = filtered.merge(price_lookup[["name_norm", "sku"]], how="left", on="name_norm")
+    missing = merged[merged["sku"].isna()]["name"].dropna().unique().tolist()
+    if missing:
+        st.warning("Не найдены в прайсе некоторые позиции категорий: " + ", ".join(missing[:10]))
+
+    return set(merged["sku"].dropna().astype(str).str.strip())
 
 
 def prepare_sku_set_from_menu(menu_df: pd.DataFrame, menu_map_df: pd.DataFrame) -> set[str]:
@@ -154,7 +168,7 @@ with st.expander("Требуемые колонки в файлах", expanded=F
 - `menu.xlsx` (опционально): `menu_item`
 - `menu_map.xlsx` (для сценариев с меню): `menu_item`, `sku`
 - `sales_history.xlsx` (опционально): `sku`, `qty`
-- Файлы категорий хранятся внутри приложения: `data/category_assortment/*.csv` (колонка `sku`)
+- Файлы категорий хранятся внутри приложения: `data/category_assortment/*.csv` (колонка `name`)
 """
     )
 
@@ -211,6 +225,7 @@ if st.button("Сформировать коммерческое предложе
 
     stock_df["sku"] = stock_df["sku"].astype(str).str.strip()
     price_df["sku"] = price_df["sku"].astype(str).str.strip()
+    price_df["name"] = price_df["name"].astype(str).str.strip()
     links_df["sku"] = links_df["sku"].astype(str).str.strip()
 
     base_skus: set[str] = set()
@@ -222,7 +237,7 @@ if st.button("Сформировать коммерческое предложе
 
         categories_df = load_category_catalog(selected_categories)
         selected_normalized = [c.strip().lower() for c in selected_categories]
-        base_skus = prepare_sku_set_from_categories(categories_df, selected_normalized)
+        base_skus = prepare_sku_set_from_categories(categories_df, selected_normalized, price_df)
 
     elif scenario.startswith("2"):
         if menu_file is None or menu_map_file is None:
