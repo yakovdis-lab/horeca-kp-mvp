@@ -88,11 +88,20 @@ def load_category_catalog(selected_categories: list[str]) -> pd.DataFrame:
             st.error(f"Не найден файл ассортимента: {path}")
             st.stop()
 
-        part = normalize_cols(read_local_table(path, str(path)))
-        if not ensure_columns(part, ["name"], str(path)):
-            st.stop()
-
-        part["name"] = part["name"].astype(str).str.strip()
+        if path.suffix.lower() == ".csv":
+            raw_lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if not raw_lines:
+                st.error(f"Файл ассортимента пустой: {path}")
+                st.stop()
+            if raw_lines[0].strip().lower() != "name":
+                st.error(f"В файле {path} первая строка должна быть: name")
+                st.stop()
+            part = pd.DataFrame({"name": raw_lines[1:]})
+        else:
+            part = normalize_cols(read_local_table(path, str(path)))
+            if not ensure_columns(part, ["name"], str(path)):
+                st.stop()
+            part["name"] = part["name"].astype(str).str.strip()
         part["category"] = category
         chunks.append(part[["category", "name"]])
 
