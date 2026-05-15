@@ -28,6 +28,7 @@ CATEGORY_FILE_MAP = {
 }
 
 CATEGORY_DIR = Path("data") / "category_assortment"
+MENU_RULES_FILE = Path("data") / "menu_ingredient_rules.csv"
 
 
 def read_table(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile, label: str) -> pd.DataFrame:
@@ -111,10 +112,51 @@ def prepare_sku_set_from_categories(categories_df: pd.DataFrame, selected_catego
     return set(merged["sku"].dropna().astype(str).str.strip())
 
 
-def prepare_sku_set_from_menu(menu_df: pd.DataFrame, menu_map_df: pd.DataFrame) -> set[str]:
-    menu_items = set(menu_df["menu_item"].astype(str).str.strip())
-    mapped = menu_map_df[menu_map_df["menu_item"].astype(str).str.strip().isin(menu_items)]
-    return set(mapped["sku"].astype(str).str.strip())
+def load_menu_rules() -> pd.DataFrame:
+    if not MENU_RULES_FILE.exists():
+        st.error(f"Не найден файл правил меню: {MENU_RULES_FILE}")
+        st.stop()
+    rules_df = normalize_cols(read_local_table(MENU_RULES_FILE, str(MENU_RULES_FILE)))
+    if not ensure_columns(rules_df, ["dish_keyword", "ingredient_name"], str(MENU_RULES_FILE)):
+        st.stop()
+    rules_df["dish_keyword"] = rules_df["dish_keyword"].astype(str).map(normalize_text)
+    rules_df["ingredient_name"] = rules_df["ingredient_name"].astype(str).str.strip()
+    return rules_df
+
+
+def infer_ingredient_names_from_menu(menu_df: pd.DataFrame, rules_df: pd.DataFrame) -> tuple[set[str], list[str]]:
+    if not ensure_columns(menu_df, ["menu_item"], "menu.xlsx"):
+        st.stop()
+
+    menu_items = menu_df["menu_item"].dropna().astype(str).map(normalize_text).tolist()
+    inferred: set[str] = set()
+    unmatched: list[str] = []
+
+    grouped_rules = rules_df.groupby("dish_keyword")["ingredient_name"].apply(list).to_dict()
+
+    for item in menu_items:
+        matched = False
+        for keyword, ingredients in grouped_rules.items():
+            if keyword and keyword in item:
+                inferred.update(ingredients)
+                matched = True
+        if not matched:
+            unmatched.append(item)
+
+    return inferred, unmatched
+
+
+def map_ingredient_names_to_sku(ingredient_names: set[str], price_df: pd.DataFrame) -> tuple[set[str], list[str]]:
+    ing_df = pd.DataFrame({"name": sorted(ingredient_names)})
+    ing_df["name_norm"] = ing_df["name"].map(normalize_text)
+
+    price_lookup = price_df[["sku", "name"]].copy()
+    price_lookup["name_norm"] = price_lookup["name"].map(normalize_text)
+
+    merged = ing_df.merge(price_lookup[["name_norm", "sku"]], how="left", on="name_norm")
+    missing = merged[merged["sku"].isna()]["name"].dropna().unique().tolist()
+    skus = set(merged["sku"].dropna().astype(str).str.strip())
+    return skus, missing
 
 
 def build_offer(base_skus: set[str], stock_df: pd.DataFrame, price_df: pd.DataFrame, links_df: pd.DataFrame) -> pd.DataFrame:
@@ -165,10 +207,10 @@ with st.expander("Требуемые колонки в файлах", expanded=F
 - `stock.xlsx`: `sku`, `stock_qty`
 - `price.xlsx`: `sku`, `name`, `price`
 - `sku_links.xlsx`: `sku`, `url`
-- `menu.xlsx` (опционально): `menu_item`
-- `menu_map.xlsx` (для сценариев с меню): `menu_item`, `sku`
+- `menu.xlsx` (для сценариев с меню): `menu_item`
 - `sales_history.xlsx` (опционально): `sku`, `qty`
-- Файлы категорий хранятся внутри приложения: `data/category_assortment/*.csv` (колонка `name`)
+- Файлы категорий: `data/category_assortment/*.csv` (колонка `name`)
+- Автоправила меню: `data/menu_ingredient_rules.csv` (колонки `dish_keyword`, `ingredient_name`)
 """
     )
 
@@ -183,7 +225,6 @@ with col1:
 
 with col2:
     menu_file = st.file_uploader("Загрузка меню (Excel/CSV для MVP)", type=["xlsx", "xls", "csv"])
-    menu_map_file = st.file_uploader("Загрузка словаря меню -> SKU (Excel/CSV)", type=["xlsx", "xls", "csv"])
     sales_history_file = st.file_uploader("Загрузка истории продаж (Excel/CSV, опционально)", type=["xlsx", "xls", "csv"])
 
 scenario = st.radio(
@@ -240,43 +281,41 @@ if st.button("Сформировать коммерческое предложе
         base_skus = prepare_sku_set_from_categories(categories_df, selected_normalized, price_df)
 
     elif scenario.startswith("2"):
-        if menu_file is None or menu_map_file is None:
-            st.error("Для сценария 2 загрузите menu.xlsx и menu_map.xlsx")
+        if menu_file is None:
+            st.error("Для сценария 2 загрузите menu.xlsx")
             st.stop()
 
         menu_df = normalize_cols(read_table(menu_file, "menu.xlsx/csv"))
-        menu_map_df = normalize_cols(read_table(menu_map_file, "menu_map.xlsx/csv"))
-        if not all(
-            [
-                ensure_columns(menu_df, ["menu_item"], "menu.xlsx"),
-                ensure_columns(menu_map_df, ["menu_item", "sku"], "menu_map.xlsx"),
-            ]
-        ):
-            st.stop()
+        rules_df = load_menu_rules()
+        ingredient_names, unmatched_menu_items = infer_ingredient_names_from_menu(menu_df, rules_df)
+        base_skus, missing_ingredients = map_ingredient_names_to_sku(ingredient_names, price_df)
 
-        base_skus = prepare_sku_set_from_menu(menu_df, menu_map_df)
+        if unmatched_menu_items:
+            st.warning("Часть блюд не распознана по правилам: " + ", ".join(unmatched_menu_items[:10]))
+        if missing_ingredients:
+            st.warning("Часть ингредиентов не найдена в прайсе: " + ", ".join(missing_ingredients[:10]))
 
     else:
-        if menu_file is None or menu_map_file is None or sales_history_file is None:
-            st.error("Для сценария 3 загрузите menu.xlsx, menu_map.xlsx и sales_history.xlsx")
+        if menu_file is None or sales_history_file is None:
+            st.error("Для сценария 3 загрузите menu.xlsx и sales_history.xlsx")
             st.stop()
 
         menu_df = normalize_cols(read_table(menu_file, "menu.xlsx/csv"))
-        menu_map_df = normalize_cols(read_table(menu_map_file, "menu_map.xlsx/csv"))
         sales_df = normalize_cols(read_table(sales_history_file, "sales_history.xlsx/csv"))
-
-        if not all(
-            [
-                ensure_columns(menu_df, ["menu_item"], "menu.xlsx"),
-                ensure_columns(menu_map_df, ["menu_item", "sku"], "menu_map.xlsx"),
-                ensure_columns(sales_df, ["sku", "qty"], "sales_history.xlsx"),
-            ]
-        ):
+        if not ensure_columns(sales_df, ["sku", "qty"], "sales_history.xlsx"):
             st.stop()
 
-        base_skus = prepare_sku_set_from_menu(menu_df, menu_map_df)
+        rules_df = load_menu_rules()
+        ingredient_names, unmatched_menu_items = infer_ingredient_names_from_menu(menu_df, rules_df)
+        base_skus, missing_ingredients = map_ingredient_names_to_sku(ingredient_names, price_df)
+
         bought_skus = set(sales_df["sku"].astype(str).str.strip())
         base_skus = base_skus - bought_skus
+
+        if unmatched_menu_items:
+            st.warning("Часть блюд не распознана по правилам: " + ", ".join(unmatched_menu_items[:10]))
+        if missing_ingredients:
+            st.warning("Часть ингредиентов не найдена в прайсе: " + ", ".join(missing_ingredients[:10]))
 
     offer_df = build_offer(base_skus, stock_df, price_df, links_df)
 
