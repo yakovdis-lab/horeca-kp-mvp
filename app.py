@@ -12,7 +12,13 @@ import streamlit as st
 st.set_page_config(page_title="MVP: Персональные КП", layout="wide")
 
 CATEGORIES = [
-    "фастфуд", "кафе", "бар", "ресторан", "кофейня", "ритейл", "туризм",
+    "фастфуд",
+    "кафе",
+    "бар",
+    "ресторан",
+    "кофейня",
+    "ритейл",
+    "туризм",
 ]
 
 CATEGORY_FILE_MAP = {
@@ -30,7 +36,7 @@ MENU_RULES_FILE = Path("data") / "menu_ingredient_rules.csv"
 AVISTRADE_SEARCH_URL = "https://avistrade.by/search/?q="
 
 
-def read_table(uploaded_file, label: str) -> pd.DataFrame:
+def read_table(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile, label: str) -> pd.DataFrame:
     try:
         filename = (uploaded_file.name or "").lower()
         if filename.endswith(".csv"):
@@ -70,7 +76,7 @@ def ensure_columns(df: pd.DataFrame, required: list[str], name: str) -> bool:
 
 
 def load_category_catalog(selected_categories: list[str]) -> pd.DataFrame:
-    chunks = []
+    chunks: list[pd.DataFrame] = []
     for category in selected_categories:
         file_name = CATEGORY_FILE_MAP.get(category)
         if not file_name:
@@ -96,7 +102,7 @@ def load_category_catalog(selected_categories: list[str]) -> pd.DataFrame:
     return pd.concat(chunks, ignore_index=True)
 
 
-def prepare_sku_set_from_categories(categories_df, selected_categories, price_df) -> set[str]:
+def prepare_sku_set_from_categories(categories_df: pd.DataFrame, selected_categories: list[str], price_df: pd.DataFrame) -> set[str]:
     filtered = categories_df[categories_df["category"].isin(selected_categories)].copy()
     filtered["name_norm"] = filtered["name"].map(normalize_text)
 
@@ -104,10 +110,6 @@ def prepare_sku_set_from_categories(categories_df, selected_categories, price_df
     price_lookup["name_norm"] = price_lookup["name"].map(normalize_text)
 
     merged = filtered.merge(price_lookup[["name_norm", "sku"]], how="left", on="name_norm")
-    missing = merged[merged["sku"].isna()]["name"].dropna().unique().tolist()
-    if missing:
-        st.warning("Не найдены в прайсе некоторые позиции категорий: " + ", ".join(missing[:10]))
-
     return set(merged["sku"].dropna().astype(str).str.strip())
 
 
@@ -123,13 +125,13 @@ def load_menu_rules() -> pd.DataFrame:
     return rules_df
 
 
-def infer_ingredient_names_from_menu(menu_df, rules_df):
+def infer_ingredient_names_from_menu(menu_df: pd.DataFrame, rules_df: pd.DataFrame) -> tuple[set[str], list[str]]:
     if not ensure_columns(menu_df, ["menu_item"], "menu.xlsx"):
         st.stop()
 
     menu_items = menu_df["menu_item"].dropna().astype(str).map(normalize_text).tolist()
-    inferred = set()
-    unmatched = []
+    inferred: set[str] = set()
+    unmatched: list[str] = []
 
     grouped_rules = rules_df.groupby("dish_keyword")["ingredient_name"].apply(list).to_dict()
 
@@ -145,7 +147,7 @@ def infer_ingredient_names_from_menu(menu_df, rules_df):
     return inferred, unmatched
 
 
-def map_ingredient_names_to_sku(ingredient_names: set[str], price_df):
+def map_ingredient_names_to_sku(ingredient_names: set[str], price_df: pd.DataFrame) -> tuple[set[str], list[str]]:
     ing_df = pd.DataFrame({"name": sorted(ingredient_names)})
     ing_df["name_norm"] = ing_df["name"].map(normalize_text)
 
@@ -162,10 +164,10 @@ def map_ingredient_names_to_sku(ingredient_names: set[str], price_df):
 def find_avistrade_link(product_name: str) -> str:
     query = quote_plus(product_name)
     fallback = f"{AVISTRADE_SEARCH_URL}{query}"
+    url = fallback
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
-        req = Request(url=fallback, headers=headers)
+        req = Request(url=url, headers=headers)
         with urlopen(req, timeout=8) as response:
             html = response.read().decode("utf-8", errors="ignore")
     except Exception:
@@ -185,7 +187,7 @@ def find_avistrade_link(product_name: str) -> str:
     return fallback
 
 
-def build_offer(base_skus, stock_df, price_df):
+def build_offer(base_skus: set[str], stock_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
     stock_map = stock_df.set_index("sku")["stock_qty"].to_dict()
     price_map = price_df.set_index("sku")["price"].to_dict()
     name_map = price_df.set_index("sku")["name"].to_dict()
@@ -196,26 +198,50 @@ def build_offer(base_skus, stock_df, price_df):
         if pd.isna(stock_qty) or float(stock_qty) <= 0:
             continue
         product_name = name_map.get(sku, sku)
-        rows.append({
-            "Наименование товара": product_name,
-            "Цена товара": price_map.get(sku, ""),
-            "Ссылка": find_avistrade_link(product_name),
-        })
+        rows.append(
+            {
+                "Наименование товара": product_name,
+                "Цена товара": price_map.get(sku, ""),
+                "Ссылка": find_avistrade_link(product_name),
+                "SKU": sku,
+                "Остаток": stock_qty,
+            }
+        )
 
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    return out.sort_values(["Наименование товара"]).reset_index(drop=True)
+    out = out.sort_values(["Наименование товара", "SKU"]).reset_index(drop=True)
+    return out[["Наименование товара", "Цена товара", "Ссылка"]]
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="КП")
+        ws = writer.sheets["КП"]
+        ws.set_column("A:A", 45)
+        ws.set_column("B:B", 14)
+        ws.set_column("C:C", 60)
     return output.getvalue()
 
 
 st.title("MVP: Персонализированное коммерческое предложение")
+st.caption("Сценарии: категория / меню / меню + история продаж")
+
+with st.expander("Требуемые колонки в файлах", expanded=False):
+    st.markdown(
+        """
+- `stock.xlsx`: `sku`, `stock_qty`
+- `price.xlsx`: `sku`, `name`, `price`
+- `menu.xlsx` (для сценариев с меню): `menu_item`
+- `sales_history.xlsx` (опционально): `sku`, `qty`
+- Файлы категорий: `data/category_assortment/*.csv` (колонка `name`)
+- Автоправила меню: `data/menu_ingredient_rules.csv` (колонки `dish_keyword`, `ingredient_name`)
+- Ссылки на `avistrade.by` подбираются автоматически по наименованию
+"""
+    )
+
 client_name = st.text_input("Название клиента")
 selected_categories = st.multiselect("Категория клиента (можно несколько)", CATEGORIES)
 
@@ -223,72 +249,107 @@ col1, col2 = st.columns(2)
 with col1:
     stock_file = st.file_uploader("Загрузка складских остатков (Excel/CSV)", type=["xlsx", "xls", "csv"])
     price_file = st.file_uploader("Загрузка прайс-листа (Excel/CSV)", type=["xlsx", "xls", "csv"])
+
 with col2:
     menu_file = st.file_uploader("Загрузка меню (Excel/CSV для MVP)", type=["xlsx", "xls", "csv"])
     sales_history_file = st.file_uploader("Загрузка истории продаж (Excel/CSV, опционально)", type=["xlsx", "xls", "csv"])
 
-scenario = st.radio("Сценарий", ["1) Только категория", "2) Есть меню", "3) Есть меню + история продаж"])
+scenario = st.radio(
+    "Сценарий",
+    [
+        "1) Только категория",
+        "2) Есть меню",
+        "3) Есть меню + история продаж",
+    ],
+)
 
 if st.button("Сформировать коммерческое предложение", type="primary"):
     if not client_name.strip():
         st.error("Введите название клиента")
         st.stop()
 
-    if stock_file is None or price_file is None:
-        st.error("Загрузите stock.xlsx и price.xlsx")
-        st.stop()
+    required_files = {
+        "stock.xlsx": stock_file,
+        "price.xlsx": price_file,
+    }
+    for name, f in required_files.items():
+        if f is None:
+            st.error(f"Загрузите {name}")
+            st.stop()
 
-    stock_df = normalize_cols(read_table(stock_file, "stock"))
-    price_df = normalize_cols(read_table(price_file, "price"))
+    stock_df = normalize_cols(read_table(stock_file, "stock.xlsx/csv"))
+    price_df = normalize_cols(read_table(price_file, "price.xlsx/csv"))
 
-    if not all([
-        ensure_columns(stock_df, ["sku", "stock_qty"], "stock.xlsx"),
-        ensure_columns(price_df, ["sku", "name", "price"], "price.xlsx"),
-    ]):
+    if not all(
+        [
+            ensure_columns(stock_df, ["sku", "stock_qty"], "stock.xlsx"),
+            ensure_columns(price_df, ["sku", "name", "price"], "price.xlsx"),
+        ]
+    ):
         st.stop()
 
     stock_df["sku"] = stock_df["sku"].astype(str).str.strip()
     price_df["sku"] = price_df["sku"].astype(str).str.strip()
     price_df["name"] = price_df["name"].astype(str).str.strip()
 
-    base_skus = set()
+    base_skus: set[str] = set()
 
     if scenario.startswith("1"):
         if not selected_categories:
             st.error("Выберите минимум 1 категорию")
             st.stop()
+
         categories_df = load_category_catalog(selected_categories)
-        base_skus = prepare_sku_set_from_categories(categories_df, [c.lower() for c in selected_categories], price_df)
+        selected_normalized = [c.strip().lower() for c in selected_categories]
+        base_skus = prepare_sku_set_from_categories(categories_df, selected_normalized, price_df)
 
     elif scenario.startswith("2"):
         if menu_file is None:
             st.error("Для сценария 2 загрузите menu.xlsx")
             st.stop()
-        menu_df = normalize_cols(read_table(menu_file, "menu"))
+
+        menu_df = normalize_cols(read_table(menu_file, "menu.xlsx/csv"))
         rules_df = load_menu_rules()
-        ingredient_names, _ = infer_ingredient_names_from_menu(menu_df, rules_df)
-        base_skus, _ = map_ingredient_names_to_sku(ingredient_names, price_df)
+        ingredient_names, unmatched_menu_items = infer_ingredient_names_from_menu(menu_df, rules_df)
+        base_skus, missing_ingredients = map_ingredient_names_to_sku(ingredient_names, price_df)
+
+        if unmatched_menu_items:
+            st.warning("Часть блюд не распознана по правилам: " + ", ".join(unmatched_menu_items[:10]))
 
     else:
         if menu_file is None or sales_history_file is None:
             st.error("Для сценария 3 загрузите menu.xlsx и sales_history.xlsx")
             st.stop()
-        menu_df = normalize_cols(read_table(menu_file, "menu"))
-        sales_df = normalize_cols(read_table(sales_history_file, "sales_history"))
+
+        menu_df = normalize_cols(read_table(menu_file, "menu.xlsx/csv"))
+        sales_df = normalize_cols(read_table(sales_history_file, "sales_history.xlsx/csv"))
         if not ensure_columns(sales_df, ["sku", "qty"], "sales_history.xlsx"):
             st.stop()
+
         rules_df = load_menu_rules()
-        ingredient_names, _ = infer_ingredient_names_from_menu(menu_df, rules_df)
-        base_skus, _ = map_ingredient_names_to_sku(ingredient_names, price_df)
-        base_skus -= set(sales_df["sku"].astype(str).str.strip())
+        ingredient_names, unmatched_menu_items = infer_ingredient_names_from_menu(menu_df, rules_df)
+        base_skus, missing_ingredients = map_ingredient_names_to_sku(ingredient_names, price_df)
+
+        bought_skus = set(sales_df["sku"].astype(str).str.strip())
+        base_skus = base_skus - bought_skus
+
+        if unmatched_menu_items:
+            st.warning("Часть блюд не распознана по правилам: " + ", ".join(unmatched_menu_items[:10]))
 
     offer_df = build_offer(base_skus, stock_df, price_df)
+
     if offer_df.empty:
-        st.warning("Подходящих позиций не найдено.")
+        st.warning("Подходящих позиций не найдено. Проверьте входные файлы и остатки.")
         st.stop()
 
+    st.success(f"КП сформировано: {len(offer_df)} позиций")
     st.dataframe(offer_df, use_container_width=True)
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     filename = f"KP_{client_name.strip().replace(' ', '_')}_{stamp}.xlsx"
-    st.download_button("Скачать Excel", to_excel_bytes(offer_df), filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+    st.download_button(
+        label="Скачать Excel",
+        data=to_excel_bytes(offer_df),
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
